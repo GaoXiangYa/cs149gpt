@@ -32,12 +32,12 @@ After this is complete, you'll see some text that begins something like this:
     Running inference using dnn model shakes128
     number of parameters: 0.80M
     Loading meta from data/shakespeare_char/meta.pkl...
-
+    
     BOTtaps along my lord.
-
+    
     DUKE OF AUMERLE:
     The this is needs! Camillo, put I will make be strong.
-
+    
     QUEEN MARGARET:
     My lord, yet t
     -------------------------------------------------------------
@@ -141,12 +141,12 @@ Now that you have your accessors, it's time to start working on your custom atte
         the dimensions of the K^t that you want are (d, N). Rather than transposing K^t, how
         can you multiply Q and K in such an order that the result is QK^t? Think about how
         you can reorder your `for` loops from traditional matrix multiplication.
-   
+       
         b) After you have achieved QK^t -- which should have shape (N, N) -- you should loop 
         through each row. For each row, you should get the exponential of each row element,
         which you can get using the C++ inbuilt `exp` function. Now, divide each of these 
         resulting exponentials by the sum of all exponentials in its row and then store it back into QK^t. 
-   
+       
         c) Finally, you should matrix multiply QK^t with V and store the result into O. 
         Notice, much like Q and K, after you index the batch and head V and O will
         be of shape (N, d). Therefore, after you multiply QK^t (N, N) with V (N, d),
@@ -187,7 +187,7 @@ After the table is dumped, we also display two relevant statistics, cpu time (in
 If your attention is not producing the correct output, you will see the following message:
 
     YOUR ATTENTION PRODUCED INCORRECT RESULTS
-    
+
 Note that you do not have to exactly match the reference `cpu time,` as long as you still produce a correct result. You should still be relatively close to the cpu time. We will provide you with a buffer of 15ms with respect to the reference cpu time. So, if you are <= 15ms behind the reference solution then that is fine and you will still get full credit. You are of course encouraged to beat the reference cpu time, and faster speeds will not be penalized.
 
 Note that the memory usage value will not change even if you allocate more intermediate variables then we give you. This memory usage is only profiled from the variables passed in as arguments. For each Parts (1-4), we provide you with the minimum amount of variables to produce the correct result. **You can also assume that all the temporary intermediate tensors that we have passed in are initialized to contain zeros.** We do this because we want you to see how the memory usage goes down as operations get fused and there will be writeup questions based on these memory values. Adding any more high memory data structures will most likely only hurt your performance, but you are welcome to try adding additional variables in your `module.cpp` file and you will not be penalized.
@@ -239,7 +239,7 @@ A correct implementation should yield the following output:
     REFERENCE - BLOCKED MATMUL + UNFUSED SOFTMAX statistics
     cpu time:  156.271ms
     mem usage:  4718588 bytes
-
+    
     STUDENT - BLOCKED MATMUL + UNFUSED SOFTMAX statistics
     cpu time:  160.891ms
     mem usage:  4718588 bytes
@@ -286,9 +286,9 @@ As you may notice, now that we have fused our matrix multiplications and softmax
 You will find `#pragma omp parallel for collapse()` useful if you find loops directly nested on top of one another and want to parallelize them. For example, for a triple perfectly nested loop:
 
     #pragma omp parallel for collapse(3)
-
+    
     for ()
-
+    
         for()
     
             for()
@@ -305,7 +305,7 @@ A correct implementation should yield the following output:
     REFERENCE - FUSED ATTENTION statistics
     cpu time:  32.361ms
     mem usage:  557052 bytes
-
+    
     STUDENT - FUSED ATTENTION statistics
     cpu time:  33.209ms
     mem usage:  557052 bytes
@@ -378,7 +378,7 @@ A correct implementation should yield the following output:
     REFERENCE - FLASH ATTENTION statistics
     cpu time:  435.709ms
     mem usage:  524284 bytes
-
+    
     STUDENT - FLASH ATTENTION statistics
     cpu time:  435.937ms
     mem usage:  524284 bytes
@@ -414,7 +414,7 @@ Note that you will not be autograded on inference, and this is purely for fun. P
 You may notice that there are many looped-based nondivergent floating point operations. This is a great place to use vector intrinsics! We have provided ISPC support for you to write you own vectorized functions for things such as matrix multiplication and row sum. The repo contains a file titled `module.ispc`. Feel free to write your own ISPC functions in here, and compile them with the command:
 
      ispc -O3 --target=avx2-i32x8 --arch=x86-64 --pic module.ispc -h module_ispc.h -o module_ispc.o 
-     
+
 To enable them in your `module.cpp` file, all you need to simply uncomment the following two lines at the top of the file:
 
     #include "module_ispc.h"
@@ -445,5 +445,5 @@ Please submit your writeup questions in a file `writeup.pdf`. REMEMBER to map th
 * Please submit the following files to Assignment 4 (Code):
   * module.cpp
   * module.ispc (if you attempted the extra credit)
-    
+  
 * Please submit your writeup in a file called `writeup.pdf` to Assignment 4 (Write-Up).
