@@ -1,4 +1,5 @@
 #include <ATen/ATen.h>
+#include <array>
 #include <cmath>
 #include <immintrin.h>
 #include <iostream>
@@ -6,6 +7,7 @@
 #include <time.h>
 #include <torch/extension.h>
 #include <vector>
+#include <xmmintrin.h>
 
 // Uncomment for ISPC
 // #include "module_ispc.h"
@@ -16,32 +18,31 @@
 // ------------------------------------ //
 
 // Step #1: Understand Read/Write Accessors for a 2D Tensor
-inline float twoDimRead(std::vector<float> &tensor, int &x, int &y,
-                        const int &sizeX) {
+inline float twoDimRead(const std::vector<float> &tensor, const int x,
+                        const int y, const int &sizeX) {
   // Note that sizeX is the size of a Row, not the number of rows
   return tensor[x * (sizeX) + y];
 }
 
-inline void twoDimWrite(std::vector<float> &tensor, int &x, int &y,
-                        const int &sizeX, float &val) {
+inline void twoDimWrite(std::vector<float> &tensor, const int x, const int y,
+                        const int sizeX, const float val) {
   tensor[x * (sizeX) + y] = val;
 }
 
 // Step #2: Implement Read/Write Accessors for a 4D Tensor
-inline float fourDimRead(std::vector<float> &tensor, int &x, int &y, int &z,
-                         int &b, const int &sizeX, const int &sizeY,
-                         const int &sizeZ) {
+inline float fourDimRead(const std::vector<float> &tensor, const int x,
+                         const int y, const int z, int b, const int sizeX,
+                         const int sizeY, const int sizeZ) {
   return tensor[x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ +
                 b];
 }
 
-inline void fourDimWrite(std::vector<float> &tensor, int &x, int &y, int &z,
-                         int &b, const int &sizeX, const int &sizeY,
-                         const int &sizeZ, float &val) {
+inline void fourDimWrite(std::vector<float> &tensor, const int x, const int y,
+                         const int z, const int b, const int sizeX,
+                         const int sizeY, const int sizeZ, const float val) {
 
   tensor[x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ + b] =
       val;
-  return;
 }
 
 // DO NOT EDIT THIS FUNCTION //
@@ -84,6 +85,48 @@ std::vector<float> formatTensor(torch::Tensor tensor) {
 // ---------------------------------------------------------- //
 //                  PART 1: NAIVE ATTENTION                   //
 // ---------------------------------------------------------- //
+inline __m256 eightDimReadVec(const std::vector<float> &tensor, const int x,
+                              const int y, const int z, int b, const int sizeX,
+                              const int sizeY, const int sizeZ, int axis = 0) {
+  float vec[8];
+
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    vec[i] = axis == 0
+                 ? fourDimRead(tensor, x, y, z, b + i, sizeX, sizeY, sizeZ)
+                 : fourDimRead(tensor, x, y, z + i, b, sizeX, sizeY, sizeZ);
+  }
+
+  return _mm256_set_ps(vec[7], vec[6], vec[5], vec[4], vec[3], vec[2], vec[1],
+                       vec[0]);
+}
+
+inline __m256 eightDimReadVec(const std::vector<float> &tensor, const int x,
+                              const int y, const int &sizeX, int axis = 0) {
+  float vec[8];
+
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    vec[i] = axis == 0 ? twoDimRead(tensor, x, y + i, sizeX)
+                       : twoDimRead(tensor, x + i, y, sizeX);
+  }
+
+  return _mm256_set_ps(vec[7], vec[6], vec[5], vec[4], vec[3], vec[2], vec[1],
+                       vec[0]);
+}
+
+inline float vecSum(const __m256 &vec) {
+  auto hadd1 = _mm256_hadd_ps(vec, vec);
+
+  auto hadd2 = _mm256_hadd_ps(hadd1, hadd1);
+
+  auto low = _mm256_castps256_ps128(hadd2);
+  auto high = _mm256_extractf128_ps(hadd2, 1);
+
+  auto res = _mm_add_ps(low, high);
+
+  return _mm_cvtss_f32(res);
+}
 
 torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
                                torch::Tensor VTensor, torch::Tensor QK_tTensor,
@@ -140,42 +183,95 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
   */
 
   // -------- YOUR CODE HERE  -------- //
+  std::array<float, 4> qkt_vec4;
   for (int b = 0; b < B; ++b) {
     for (int h = 0; h < H; ++h) {
       // Q * K
       for (int i = 0; i < N; ++i) {
         for (int k = 0; k < N; ++k) {
+
           float sum = 0.0f;
-          for (int j = 0; j < d; ++j) {
-            float q_val = fourDimRead(Q, b, h, i, j, H, N, d);
-            float k_val = fourDimRead(K, b, h, k, j, H, N, d);
+          int last = (d / 8) * 8;
+
+          for (int j = 0; j < last; j += 8) {
+            auto q_vec = eightDimReadVec(Q, b, h, i, j, H, N, d);
+            auto k_vec = eightDimReadVec(K, b, h, k, j, H, N, d);
+
+            auto qk_vec = _mm256_mul_ps(q_vec, k_vec);
+
+            sum += vecSum(qk_vec);
+          }
+#pragma unroll
+          for (int p = last; p < d; ++p) {
+            float q_val = fourDimRead(Q, b, h, i, p, H, N, d);
+            float k_val = fourDimRead(K, b, h, k, p, H, N, d);
             sum += q_val * k_val;
           }
+
           twoDimWrite(QK_t, i, k, N, sum);
         }
       }
+
       // Softmax(QK_t)
       for (int i = 0; i < N; ++i) {
         float exp_sum = 0.0f;
-        for (int j = 0; j < N; ++j) {
-          float val = twoDimRead(QK_t, i, j, N);
+        int last = (N / 4) * 4;
+
+        for (int j = 0; j < last; j += 4) {
+          qkt_vec4[0] = twoDimRead(QK_t, i, j, N);
+          qkt_vec4[1] = twoDimRead(QK_t, i, j + 1, N);
+          qkt_vec4[2] = twoDimRead(QK_t, i, j + 2, N);
+          qkt_vec4[3] = twoDimRead(QK_t, i, j + 3, N);
+          exp_sum += (std::exp(qkt_vec4[0]) + std::exp(qkt_vec4[1]) +
+                      std::exp(qkt_vec4[2]) + std::exp(qkt_vec4[3]));
+        }
+#pragma unroll
+        for (int p = last; p < d; ++p) {
+          float val = twoDimRead(QK_t, i, p, N);
           exp_sum += std::exp(val);
         }
-        for (int k = 0; k < N; ++k) {
+
+        for (int k = 0; k < last; k += 4) {
+          qkt_vec4[0] = twoDimRead(QK_t, i, k, N);
+          qkt_vec4[1] = twoDimRead(QK_t, i, k + 1, N);
+          qkt_vec4[2] = twoDimRead(QK_t, i, k + 2, N);
+          qkt_vec4[3] = twoDimRead(QK_t, i, k + 3, N);
           float val = twoDimRead(QK_t, i, k, N);
-          float sotmax_val = std::exp(val) / exp_sum;
+          float sotmax_val = std::exp(qkt_vec4[0]) / exp_sum;
           twoDimWrite(QK_t, i, k, N, sotmax_val);
+          sotmax_val = std::exp(qkt_vec4[1]) / exp_sum;
+          twoDimWrite(QK_t, i, k + 1, N, sotmax_val);
+          sotmax_val = std::exp(qkt_vec4[2]) / exp_sum;
+          twoDimWrite(QK_t, i, k + 2, N, sotmax_val);
+          sotmax_val = std::exp(qkt_vec4[3]) / exp_sum;
+          twoDimWrite(QK_t, i, k + 3, N, sotmax_val);
+        }
+#pragma unroll
+        for (int p = last; p < d; ++p) {
+          float val = twoDimRead(QK_t, i, p, N);
+          float sotmax_val = std::exp(val) / exp_sum;
+          twoDimWrite(QK_t, i, p, N, sotmax_val);
         }
       }
+
       // Softmax(QK_t) * V
       for (int i = 0; i < N; ++i) {
         for (int j = 0; j < d; ++j) {
           float sum = 0.0f;
-          for (int k = 0; k < N; ++k) {
-            float qk_val = twoDimRead(QK_t, i, k, N);
-            float v_val = fourDimRead(V, b, h, k, j, H, N, d);
-            sum += qk_val * v_val;
+          int last = (N / 8) * 8;
+          for (int k = 0; k < N; k += 8) {
+            auto qkt_vec = eightDimReadVec(QK_t, i, k, N);
+            auto v_vec = eightDimReadVec(V, b, h, k, j, H, N, d, 1);
+
+            auto qkv_vec = _mm256_mul_ps(qkt_vec, v_vec);
+            sum += vecSum(qkv_vec);
           }
+          for (int p = last; p < N; ++p) {
+            float qkv_val = twoDimRead(QK_t, i, p, N);
+            float v_val = fourDimRead(V, b, h, p, j, H, N, d);
+            sum += qkv_val * v_val;
+          }
+
           fourDimWrite(O, b, h, i, j, H, N, d, sum);
         }
       }
