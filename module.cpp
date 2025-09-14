@@ -163,7 +163,7 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
         }
         for (int k = 0; k < N; ++k) {
           float val = twoDimRead(QK_t, i, k, N);
-          float sotmax_val = val / exp_sum;
+          float sotmax_val = std::exp(val) / exp_sum;
           twoDimWrite(QK_t, i, k, N, sotmax_val);
         }
       }
