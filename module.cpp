@@ -44,14 +44,10 @@ inline void twoDimWrite(std::vector<float> &tensor, const int x, const int y,
 }
 
 inline void twoDimWriteVec(std::vector<float> &tensor, const int x, const int y,
-                           const int sizeX, const vec_t& val) {
+                           const int sizeX, const vec_t &val) {
   size_t offset = x * sizeX + y;
   assert(offset < tensor.size());
-  for (int i = 0; i < 8; ++ i) {
-    twoDimWrite(tensor, x, y +i, sizeX, val.d[i]);
-    assert(twoDimRead(tensor, x, y +i, sizeX) >= 0.00001);
-  }
-  // _mm256_storeu_ps((tensor.data() + offset), val);
+  _mm256_storeu_ps((tensor.data() + offset), val.v);
 }
 
 // Step #2: Implement Read/Write Accessors for a 4D Tensor
@@ -68,7 +64,6 @@ inline const float *fourDimReadPtr(const std::vector<float> &tensor,
                                    const int sizeZ) {
   size_t offset =
       x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ + b;
-
   assert(offset < tensor.size());
   return (tensor.data() + offset);
 }
@@ -76,9 +71,18 @@ inline const float *fourDimReadPtr(const std::vector<float> &tensor,
 inline void fourDimWrite(std::vector<float> &tensor, const int x, const int y,
                          const int z, const int b, const int sizeX,
                          const int sizeY, const int sizeZ, const float val) {
-
   tensor[x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ + b] =
       val;
+}
+
+inline void fourDimWriteVec(std::vector<float> &tensor, const int x,
+                            const int y, const int z, const int b,
+                            const int sizeX, const int sizeY, const int sizeZ,
+                            const vec_t &val) {
+  size_t offset =
+      x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ + b;
+  assert(offset < tensor.size());
+  _mm256_storeu_ps(tensor.data() + offset, val.v);
 }
 
 // DO NOT EDIT THIS FUNCTION //
@@ -88,6 +92,51 @@ std::vector<float> formatTensor(torch::Tensor tensor) {
   std::vector<float> vec(tensor.data_ptr<float>(),
                          tensor.data_ptr<float>() + tensor.numel());
   return vec;
+}
+
+inline vec_t fourDimReadVecAlongD(const std::vector<float> &tensor, const int x,
+                                  const int y, const int z, int b,
+                                  const int sizeX, const int sizeY,
+                                  const int sizeZ, int axis = 0) {
+  vec_t vec;
+  vec.v =
+      _mm256_loadu_ps(fourDimReadPtr(tensor, x, y, z, b, sizeX, sizeY, sizeZ));
+  return vec;
+}
+
+inline vec_t fourDimReadVecAlongN(const std::vector<float> &tensor, const int x,
+                                  const int y, const int z, int b,
+                                  const int sizeX, const int sizeY,
+                                  const int sizeZ, int axis = 0) {
+  vec_t vec;
+  vec.d[0] = fourDimRead(tensor, x, y, z, b, sizeX, sizeY, sizeZ);
+  vec.d[1] = fourDimRead(tensor, x, y, z + 1, b, sizeX, sizeY, sizeZ);
+  vec.d[2] = fourDimRead(tensor, x, y, z + 2, b, sizeX, sizeY, sizeZ);
+  vec.d[3] = fourDimRead(tensor, x, y, z + 3, b, sizeX, sizeY, sizeZ);
+  vec.d[4] = fourDimRead(tensor, x, y, z + 4, b, sizeX, sizeY, sizeZ);
+  vec.d[5] = fourDimRead(tensor, x, y, z + 5, b, sizeX, sizeY, sizeZ);
+  vec.d[6] = fourDimRead(tensor, x, y, z + 6, b, sizeX, sizeY, sizeZ);
+  vec.d[7] = fourDimRead(tensor, x, y, z + 7, b, sizeX, sizeY, sizeZ);
+
+  return vec;
+}
+
+inline float getVecExpSum(const vec_t &vec) {
+  return (std::exp(vec.d[0]) + std::exp(vec.d[1]) + std::exp(vec.d[2]) +
+          std::exp(vec.d[3]) + std::exp(vec.d[4]) + std::exp(vec.d[5]) +
+          std::exp(vec.d[6]) + std::exp(vec.d[7]));
+}
+
+inline void getVecSoftmax(vec_t &softmax_vec, const vec_t &qkt_vec,
+                          const float exp_sum) {
+  softmax_vec.d[0] = std::exp(qkt_vec.d[0]) / exp_sum;
+  softmax_vec.d[1] = std::exp(qkt_vec.d[1]) / exp_sum;
+  softmax_vec.d[2] = std::exp(qkt_vec.d[2]) / exp_sum;
+  softmax_vec.d[3] = std::exp(qkt_vec.d[3]) / exp_sum;
+  softmax_vec.d[4] = std::exp(qkt_vec.d[4]) / exp_sum;
+  softmax_vec.d[5] = std::exp(qkt_vec.d[5]) / exp_sum;
+  softmax_vec.d[6] = std::exp(qkt_vec.d[6]) / exp_sum;
+  softmax_vec.d[7] = std::exp(qkt_vec.d[7]) / exp_sum;
 }
 
 /* Programming Your Attention Modules.
@@ -121,44 +170,6 @@ std::vector<float> formatTensor(torch::Tensor tensor) {
 // ---------------------------------------------------------- //
 //                  PART 1: NAIVE ATTENTION                   //
 // ---------------------------------------------------------- //
-inline vec_t fourDimGetVecAlongD(const std::vector<float> &tensor, const int x,
-                                 const int y, const int z, int b,
-                                 const int sizeX, const int sizeY,
-                                 const int sizeZ, int axis = 0) {
-  // float vec[8];
-  vec_t vec;
-  vec.v =
-      _mm256_loadu_ps(fourDimReadPtr(tensor, x, y, z, b, sizeX, sizeY, sizeZ));
-  return vec;
-}
-
-inline vec_t fourDimGetVecAlongN(const std::vector<float> &tensor, const int x,
-                                 const int y, const int z, int b,
-                                 const int sizeX, const int sizeY,
-                                 const int sizeZ, int axis = 0) {
-  // float vec[8];
-  vec_t vec;
-  vec.d[0] = fourDimRead(tensor, x, y, z, b, sizeX, sizeY, sizeZ);
-  vec.d[1] = fourDimRead(tensor, x, y, z + 1, b, sizeX, sizeY, sizeZ);
-  vec.d[2] = fourDimRead(tensor, x, y, z + 2, b, sizeX, sizeY, sizeZ);
-  vec.d[3] = fourDimRead(tensor, x, y, z + 3, b, sizeX, sizeY, sizeZ);
-  vec.d[4] = fourDimRead(tensor, x, y, z + 4, b, sizeX, sizeY, sizeZ);
-  vec.d[5] = fourDimRead(tensor, x, y, z + 5, b, sizeX, sizeY, sizeZ);
-  vec.d[6] = fourDimRead(tensor, x, y, z + 6, b, sizeX, sizeY, sizeZ);
-  vec.d[7] = fourDimRead(tensor, x, y, z + 7, b, sizeX, sizeY, sizeZ);
-
-  return vec;
-}
-
-inline void printVec(const vec_t& vec) {
-  for (int i = 0; i < 8; ++ i) {
-    // if (vec.d[i] == 0) {
-      std::cout << vec.d[i] << " ";
-    // }
-      // std::cout << vec.d[i] << " ";
-  }
-  std::cout << "\n";
-}
 
 torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
                                torch::Tensor VTensor, torch::Tensor QK_tTensor,
@@ -215,103 +226,200 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
   */
 
   // -------- YOUR CODE HERE  -------- //
+  vec_t k_vec;
+  vec_t q_vec0, q_vec1, q_vec2, q_vec3;
+  vec_t v_vec;
+  vec_t qkt_vec0, qkt_vec1, qkt_vec2, qkt_vec3;
+  vec_t softmax_vec0, softmax_vec1, softmax_vec2, softmax_vec3;
+  vec_t o_vec0, o_vec1, o_vec2, o_vec3;
+
+  float q_val0 = 0.0f, q_val1 = 0.0f, q_val2 = 0.0f, q_val3 = 0.0f;
+  float qkt_val0 = 0.0f, qkt_val1 = 0.0f, qkt_val2 = 0.0f, qkt_val3 = 0.0f;
+  float k_val = 0.0f, v_val = 0.0f, qk_val = 0.0f;
+  float o_val0 = 0.0f, o_val1 = 0.0f, o_val2 = 0.0f, o_val3 = 0.0f;
+  float exp_sum0 = 0.0f, exp_sum1 = 0.0f, exp_sum2 = 0.0f, exp_sum3 = 0.0f;
+  float exp_sum = 0.0f;
+  float softmax_val = 0.0f;
+  const float zero = 0.0f;
+  int last = 0;
+
   for (int b = 0; b < B; ++b) {
     for (int h = 0; h < H; ++h) {
       // Q(N, d) * K(N, d)
-      for (int i = 0; i < N; ++i) {
-        int last = (N / 8) * 8;
-        // calculate:
-        // qk(i, j), qk(i, j + 1), qk(i, j + 2), qk(i, j + 3)
-        // qk(i, j + 4), qk(i, j + 5), qk(i, j + 6), qk(i, j + 7)
+      for (int i = 0; i < N; i += 4) {
+        last = (N / 8) * 8;
+        // q(i, j) ......q(i, j + 7)
+        //    .    ......     .
+        //    .    ......     .
+        // q(i + 3)......q(i + 3, j + 7)
         for (int j = 0; j < last; j += 8) {
-          vec_t qk_vec;
-          qk_vec.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i, j, N));
+          qkt_vec0.v = _mm256_broadcast_ss(&zero);
+          qkt_vec1.v = _mm256_broadcast_ss(&zero);
+          qkt_vec2.v = _mm256_broadcast_ss(&zero);
+          qkt_vec3.v = _mm256_broadcast_ss(&zero);
           for (int k = 0; k < d; ++k) {
-            float q_val = fourDimRead(Q, b, h, i, k, H, N, d);
-            auto k_vec = fourDimGetVecAlongN(K, b, h, j, k, H, N, d);
-            auto q_vec = _mm256_broadcast_ss(&q_val);
-            qk_vec.v = _mm256_fmadd_ps(q_vec, k_vec.v, qk_vec.v);
+            q_val0 = fourDimRead(Q, b, h, i, k, H, N, d);
+            q_val1 = fourDimRead(Q, b, h, i + 1, k, H, N, d);
+            q_val2 = fourDimRead(Q, b, h, i + 2, k, H, N, d);
+            q_val3 = fourDimRead(Q, b, h, i + 3, k, H, N, d);
+
+            k_vec = fourDimReadVecAlongN(K, b, h, j, k, H, N, d);
+
+            q_vec0.v = _mm256_broadcast_ss(&q_val0);
+            q_vec1.v = _mm256_broadcast_ss(&q_val1);
+            q_vec2.v = _mm256_broadcast_ss(&q_val2);
+            q_vec3.v = _mm256_broadcast_ss(&q_val3);
+
+            qkt_vec0.v = _mm256_fmadd_ps(q_vec0.v, k_vec.v, qkt_vec0.v);
+            qkt_vec1.v = _mm256_fmadd_ps(q_vec1.v, k_vec.v, qkt_vec1.v);
+            qkt_vec2.v = _mm256_fmadd_ps(q_vec2.v, k_vec.v, qkt_vec2.v);
+            qkt_vec3.v = _mm256_fmadd_ps(q_vec3.v, k_vec.v, qkt_vec3.v);
           }
-          twoDimWriteVec(QK_t, i, j, N, qk_vec);
+          twoDimWriteVec(QK_t, i, j, N, qkt_vec0);
+          twoDimWriteVec(QK_t, i + 1, j, N, qkt_vec1);
+          twoDimWriteVec(QK_t, i + 2, j, N, qkt_vec2);
+          twoDimWriteVec(QK_t, i + 3, j, N, qkt_vec3);
         }
         // calculate qk(i, p)
         for (int p = last; p < N; ++p) {
-          float sum = twoDimRead(QK_t, i, p, N);
+          qkt_val0 = 0.0f, qkt_val1 = 0.0f, qkt_val2 = 0.0f, qkt_val3 = 0.0f;
           for (int k = 0; k < d; ++k) {
-            float q_val = fourDimRead(Q, b, h, i, k, H, N, d);
-            float k_val = fourDimRead(K, b, h, p, k, H, N, d);
-            sum += q_val * k_val;
-          }
+            q_val0 = fourDimRead(Q, b, h, i, k, H, N, d);
+            q_val1 = fourDimRead(Q, b, h, i + 1, k, H, N, d);
+            q_val2 = fourDimRead(Q, b, h, i + 2, k, H, N, d);
+            q_val3 = fourDimRead(Q, b, h, i + 3, k, H, N, d);
 
-          twoDimWrite(QK_t, i, p, N, sum);
+            k_val = fourDimRead(K, b, h, p, k, H, N, d);
+
+            qkt_val0 += q_val0 * k_val;
+            qkt_val1 += q_val1 * k_val;
+            qkt_val2 += q_val2 * k_val;
+            qkt_val3 += q_val3 * k_val;
+          }
+          twoDimWrite(QK_t, i, p, N, qkt_val0);
+          twoDimWrite(QK_t, i + 1, p, N, qkt_val1);
+          twoDimWrite(QK_t, i + 2, p, N, qkt_val2);
+          twoDimWrite(QK_t, i + 3, p, N, qkt_val3);
         }
       }
 
       // Softmax(QK_t)
-      for (int i = 0; i < N; ++i) {
-        float exp_sum = 0.0f;
-        int last = (N / 8) * 8;
-        vec_t qkt_vec;
+      for (int i = 0; i < N; i += 4) {
+        exp_sum0 = exp_sum1 = exp_sum2 = exp_sum3 = 0.0f;
+        last = (N / 8) * 8;
         for (int j = 0; j < last; j += 8) {
-          qkt_vec.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i, j, N));
-          exp_sum += (std::exp(qkt_vec.d[0]) + std::exp(qkt_vec.d[1]) +
-                      std::exp(qkt_vec.d[2]) + std::exp(qkt_vec.d[3]) +
-                      std::exp(qkt_vec.d[4]) + std::exp(qkt_vec.d[5]) +
-                      std::exp(qkt_vec.d[6]) + std::exp(qkt_vec.d[7]));
+          qkt_vec0.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i, j, N));
+          qkt_vec1.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i + 1, j, N));
+          qkt_vec2.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i + 2, j, N));
+          qkt_vec3.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i + 3, j, N));
+
+          exp_sum0 += getVecExpSum(qkt_vec0);
+          exp_sum1 += getVecExpSum(qkt_vec1);
+          exp_sum2 += getVecExpSum(qkt_vec2);
+          exp_sum3 += getVecExpSum(qkt_vec3);
         }
         for (int p = last; p < N; ++p) {
-          float val = twoDimRead(QK_t, i, p, N);
-          exp_sum += std::exp(val);
+          qkt_val0 = twoDimRead(QK_t, i, p, N);
+          qkt_val1 = twoDimRead(QK_t, i + 1, p, N);
+          qkt_val2 = twoDimRead(QK_t, i + 2, p, N);
+          qkt_val3 = twoDimRead(QK_t, i + 3, p, N);
+
+          exp_sum += (std::exp(qkt_val0) + std::exp(qkt_val1) +
+                      std::exp(qkt_val2) + std::exp(qkt_val3));
         }
-        vec_t val_vec;
-        vec_t softmax_vec;
         for (int j = 0; j < last; j += 8) {
-          qkt_vec.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i, j, N));
-          // val_vec.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i, j, N));
-          softmax_vec.d[0] = std::exp(qkt_vec.d[0]) / exp_sum;
-          softmax_vec.d[1] = std::exp(qkt_vec.d[1]) / exp_sum;
-          softmax_vec.d[2] = std::exp(qkt_vec.d[2]) / exp_sum;
-          softmax_vec.d[3] = std::exp(qkt_vec.d[3]) / exp_sum;
-          softmax_vec.d[4] = std::exp(qkt_vec.d[4]) / exp_sum;
-          softmax_vec.d[5] = std::exp(qkt_vec.d[5]) / exp_sum;
-          softmax_vec.d[6] = std::exp(qkt_vec.d[6]) / exp_sum;
-          softmax_vec.d[7] = std::exp(qkt_vec.d[7]) / exp_sum;
-          twoDimWriteVec(QK_t, i, j, N, softmax_vec);
+          qkt_vec0.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i, j, N));
+          qkt_vec1.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i + 1, j, N));
+          qkt_vec2.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i + 2, j, N));
+          qkt_vec3.v = _mm256_loadu_ps(twoDimReadPtr(QK_t, i + 3, j, N));
+
+          getVecSoftmax(softmax_vec0, qkt_vec0, exp_sum0);
+          twoDimWriteVec(QK_t, i, j, N, softmax_vec0);
+
+          getVecSoftmax(softmax_vec1, qkt_vec1, exp_sum1);
+          twoDimWriteVec(QK_t, i + 1, j, N, softmax_vec1);
+
+          getVecSoftmax(softmax_vec2, qkt_vec2, exp_sum2);
+          twoDimWriteVec(QK_t, i + 2, j, N, softmax_vec2);
+
+          getVecSoftmax(softmax_vec3, qkt_vec3, exp_sum3);
+          twoDimWriteVec(QK_t, i + 3, j, N, softmax_vec3);
         }
         for (int p = last; p < N; ++p) {
-          float val = twoDimRead(QK_t, i, p, N);
-          float sotmax_val = std::exp(val) / exp_sum;
-          twoDimWrite(QK_t, i, p, N, sotmax_val);
+          qkt_val0 = twoDimRead(QK_t, i, p, N);
+          qkt_val1 = twoDimRead(QK_t, i + 1, p, N);
+          qkt_val2 = twoDimRead(QK_t, i + 2, p, N);
+          qkt_val3 = twoDimRead(QK_t, i + 3, p, N);
+
+          softmax_val = std::exp(qkt_val0) / exp_sum;
+          twoDimWrite(QK_t, i, p, N, softmax_val);
+
+          softmax_val = std::exp(qkt_val1) / exp_sum;
+          twoDimWrite(QK_t, i + 1, p, N, softmax_val);
+
+          softmax_val = std::exp(qkt_val2) / exp_sum;
+          twoDimWrite(QK_t, i + 2, p, N, softmax_val);
+
+          softmax_val = std::exp(qkt_val3) / exp_sum;
+          twoDimWrite(QK_t, i + 3, p, N, softmax_val);
         }
       }
 
       // Softmax(QK_t)[N, N] * V[N, d]
-      for (int i = 0; i < N; ++i) {
-        int last = (d / 8) * 8;
-        // o(i, j), o(i, j + 1), o(i, j + 2), o(i, j + 3)
-        // o(i, j + 4), o(i, j + 5), o(i, j + 6), o(i, j + 7)
+      for (int i = 0; i < N; i += 4) {
+        last = (d / 8) * 8;
+        // o(i, j), ......... ,o(i, j + 7)
+        // o(i + 1, j), ......... ,o(i + 1, j + 7)
+        // o(i + 2, j), ......... ,o(i + 2, j + 7)
+        // o(i + 3, j), ......... ,o(i + 3, j + 7)
         for (int j = 0; j < last; j += 8) {
-          vec_t output_vec;
-          output_vec.v = _mm256_loadu_ps(twoDimReadPtr(O, i, j, d));
+          o_vec0.v = _mm256_broadcast_ss(&zero);
+          o_vec1.v = _mm256_broadcast_ss(&zero);
+          o_vec2.v = _mm256_broadcast_ss(&zero);
+          o_vec3.v = _mm256_broadcast_ss(&zero);
           for (int k = 0; k < N; ++k) {
-            float qkt_val = twoDimRead(QK_t, i, k, N);
-            auto v_vec = fourDimGetVecAlongD(V, b, h, k, j, H, N, d);
-            auto qkt_vec = _mm256_broadcast_ss(&qkt_val);
-            output_vec.v = _mm256_fmadd_ps(qkt_vec, v_vec.v, output_vec.v);
+            qkt_val0 = twoDimRead(QK_t, i, k, N);
+            qkt_val1 = twoDimRead(QK_t, i + 1, k, N);
+            qkt_val2 = twoDimRead(QK_t, i + 2, k, N);
+            qkt_val3 = twoDimRead(QK_t, i + 3, k, N);
+
+            v_vec = fourDimReadVecAlongD(V, b, h, k, j, H, N, d);
+
+            qkt_vec0.v = _mm256_broadcast_ss(&qkt_val0);
+            qkt_vec1.v = _mm256_broadcast_ss(&qkt_val1);
+            qkt_vec2.v = _mm256_broadcast_ss(&qkt_val2);
+            qkt_vec3.v = _mm256_broadcast_ss(&qkt_val3);
+
+            o_vec0.v = _mm256_fmadd_ps(qkt_vec0.v, v_vec.v, o_vec0.v);
+            o_vec1.v = _mm256_fmadd_ps(qkt_vec1.v, v_vec.v, o_vec1.v);
+            o_vec2.v = _mm256_fmadd_ps(qkt_vec2.v, v_vec.v, o_vec2.v);
+            o_vec3.v = _mm256_fmadd_ps(qkt_vec3.v, v_vec.v, o_vec3.v);
           }
-          twoDimWriteVec(O, i, j, d, output_vec);
-          // printVec(output_vec);
+          fourDimWriteVec(O, b, h, i, j, H, N, d, o_vec0);
+          fourDimWriteVec(O, b, h, i + 1, j, H, N, d, o_vec1);
+          fourDimWriteVec(O, b, h, i + 2, j, H, N, d, o_vec2);
+          fourDimWriteVec(O, b, h, i + 3, j, H, N, d, o_vec3);
         }
 
         for (int p = last; p < d; ++p) {
-          float sum = 0.0f;
+          o_val0 = o_val1 = o_val2 = o_val3 = 0.0f;
           for (int k = 0; k < N; ++k) {
-            std::cout << __func__ << "\n";
-            float qkv_val = twoDimRead(QK_t, i, k, N);
-            float v_val = fourDimRead(V, b, h, k, p, H, N, d);
-            sum += qkv_val * v_val;
+            qkt_val0 = twoDimRead(QK_t, i, k, N);
+            qkt_val1 = twoDimRead(QK_t, i + 1, k, N);
+            qkt_val2 = twoDimRead(QK_t, i + 2, k, N);
+            qkt_val3 = twoDimRead(QK_t, i + 3, k, N);
+
+            v_val = fourDimRead(V, b, h, k, p, H, N, d);
+
+            o_val0 += qkt_val0 * v_val;
+            o_val1 += qkt_val1 * v_val;
+            o_val2 += qkt_val2 * v_val;
+            o_val3 += qkt_val3 * v_val;
           }
-          twoDimWrite(O, i, p, d, sum);
+          fourDimWrite(O, b, h, i, p, H, N, d, o_val0);
+          fourDimWrite(O, b, h, i + 1, p, H, N, d, o_val1);
+          fourDimWrite(O, b, h, i + 2, p, H, N, d, o_val2);
+          fourDimWrite(O, b, h, i + 3, p, H, N, d, o_val3);
         }
       }
     }
