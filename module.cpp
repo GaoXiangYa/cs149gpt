@@ -50,6 +50,13 @@ inline void twoDimWriteVec(std::vector<float> &tensor, const int x, const int y,
   _mm256_storeu_ps((tensor.data() + offset), val.v);
 }
 
+inline int twoDimOffset(const std::vector<float> &tensor, const int x,
+                         const int y, const int &sizeX) {
+  auto offset = x * sizeX + y;
+  assert(offset < tensor.size());
+  return offset;
+}
+
 // Step #2: Implement Read/Write Accessors for a 4D Tensor
 inline float fourDimRead(const std::vector<float> &tensor, const int x,
                          const int y, const int z, int b, const int sizeX,
@@ -83,6 +90,15 @@ inline void fourDimWriteVec(std::vector<float> &tensor, const int x,
       x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ + b;
   assert(offset < tensor.size());
   _mm256_storeu_ps(tensor.data() + offset, val.v);
+}
+
+inline int fourDimOffset(const std::vector<float> &tensor, const int x,
+                         const int y, const int z, int b, const int sizeX,
+                         const int sizeY, const int sizeZ) {
+  size_t offset =
+      x * (sizeX * sizeY * sizeZ) + y * (sizeY * sizeZ) + z * sizeZ + b;
+  assert(offset < tensor.size());
+  return offset;
 }
 
 // DO NOT EDIT THIS FUNCTION //
@@ -139,6 +155,103 @@ inline void getVecSoftmax(vec_t &softmax_vec, const vec_t &qkt_vec,
   softmax_vec.d[7] = std::exp(qkt_vec.d[7]) / exp_sum;
 }
 
+#define A(i, j) A[(i * lda) + j]
+#define B(i, j) B[(i * ldb) + j]
+#define C(i, j) C[(i * ldc) + j]
+
+// M = N, N = d, k = N
+// lda = d, ldb = d, ldc = N
+inline void addDot4x8(float *A, float *B, float *C, int M, int N, int K) {
+  constexpr float zero = 0.0f;
+  vec_t a_vec0, a_vec1, a_vec2, a_vec3;
+  vec_t b_vec;
+  vec_t c_vec0, c_vec1, c_vec2, c_vec3;
+
+  const int lda = N, ldb = N, ldc = K;
+
+  float a_val0 = 0.0f, a_val1 = 0.0f, a_val2 = 0.0f, a_val3 = 0.0f;
+
+  c_vec0.v = _mm256_broadcast_ss(&zero);
+  c_vec1.v = _mm256_broadcast_ss(&zero);
+  c_vec2.v = _mm256_broadcast_ss(&zero);
+  c_vec3.v = _mm256_broadcast_ss(&zero);
+  
+  a_vec0.v = _mm256_broadcast_ss(&zero);
+  a_vec1.v = _mm256_broadcast_ss(&zero);
+  a_vec2.v = _mm256_broadcast_ss(&zero);
+  a_vec3.v = _mm256_broadcast_ss(&zero);
+
+  b_vec.v = _mm256_broadcast_ss(&zero);
+  
+  for (int k = 0; k < K; ++k) {
+    a_val0 = A(0, k);
+    a_val1 = A(1, k);
+    a_val2 = A(2, k);
+    a_val3 = A(3, k);
+    a_vec0.v = _mm256_broadcast_ss(&a_val0);
+    a_vec1.v = _mm256_broadcast_ss(&a_val1);
+    a_vec2.v = _mm256_broadcast_ss(&a_val2);
+    a_vec3.v = _mm256_broadcast_ss(&a_val3);
+
+    b_vec.v = _mm256_set_ps(B(7, k), B(6, k), B(5, k), B(4, k), B(3, k),
+                            B(2, k), B(1, k), B(0, k));
+
+    c_vec0.v = _mm256_fmadd_ps(a_vec0.v, b_vec.v, c_vec0.v);
+    c_vec1.v = _mm256_fmadd_ps(a_vec1.v, b_vec.v, c_vec1.v);
+    c_vec2.v = _mm256_fmadd_ps(a_vec2.v, b_vec.v, c_vec2.v);
+    c_vec3.v = _mm256_fmadd_ps(a_vec3.v, b_vec.v, c_vec3.v);
+  }
+
+  _mm256_storeu_ps(&C(0, 0), c_vec0.v);
+  _mm256_storeu_ps(&C(1, 0), c_vec1.v);
+  _mm256_storeu_ps(&C(2, 0), c_vec2.v);
+  _mm256_storeu_ps(&C(3, 0), c_vec3.v);
+}
+
+inline void addDot4x1(float *A, float *B, float *C, const int M, const int N, const int K) {
+  const int lda = M, ldb = N, ldc = K;
+  float a_val0 = 0.0f, a_val1 = 0.0f, a_val2 = 0.0f, a_val3 = 0.0f;
+  float b_val = 0.0f;
+  float c_val0 = 0.0f, c_val1 = 0.0f, c_val2 = 0.0f, c_val3 = 0.0f;
+  for (int k = 0; k < K; ++k) {
+    a_val0 = A(0, k);
+    a_val1 = A(1, k);
+    a_val2 = A(2, k);
+    a_val3 = A(3, k);
+
+    b_val = B(0, k);
+
+    c_val0 += a_val0 * b_val;
+    c_val1 += a_val1 * b_val;
+    c_val2 += a_val2 * b_val;
+    c_val3 += a_val3 * b_val;
+  }
+  C(0, 0) = c_val0;
+  C(1, 0) = c_val1;
+  C(2, 0) = c_val2;
+  C(3, 0) = c_val3;
+}
+
+// A[M, K] * B[K, N] = C[M, N]
+// M = n, N = d, K = N;
+inline void innerKernel(float *A, float *B, float *C, const int M, const int N, const int K) {
+  constexpr float zero = 0.0f;
+  constexpr int MR = 4;
+  constexpr int NR = 8;
+  const int lda = N, ldb = N, ldc = K;
+
+  int last = 0;
+
+  for (int i = 0; i < M; i += MR) {
+    last = (N / NR) * NR;
+    for (int j = 0; j < last; j += NR) {
+      addDot4x8(&A(i, 0), &B(0, j), &C(i, j), M, N, K);
+    }
+    for (int p = last; p < N; ++p) {
+      addDot4x1(&A(i, 0), &B(0, p), &C(i, p), M, N, K);
+    }
+  }
+}
 /* Programming Your Attention Modules.
  *
  * You are given Q, K, and V Tensors as inputs that are formatted as vectors. We
@@ -190,41 +303,6 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
   // Format QK_t Tensor into a 2D vector.
   std::vector<float> QK_t = formatTensor(QK_tTensor);
 
-  /* Here is an example of how to read/write 0's to  Q (B, H, N, d) using the 4D
-     accessors
-
-      //loop over Batch Size
-       for (int b = 0; b < B; b++) {
-
-           //loop over Heads
-           for (int h = 0; h < H; h++) {
-
-               //loop over Sequence Length
-               for (int i = 0; i < N; i++) {
-
-                   //loop over Embedding Dimensionality
-                   for (int j = 0; j < d; j++) {
-                      float val = fourDimRead(Q, b, h, i, j, H, N, d);
-                      val = 0.0;
-                      fourDimWrite(Q, b, h, i, j, H, N, d, val);
-                   }
-               }
-           }
-       }
-  */
-
-  /* Here is an example of how to read/write 0's to  QK_t (N, N) using the 2D
-     accessors
-
-         for (int i = 0; i < N; i++) {
-             for (int j = 0; j < N; j++) {
-                 float val = twoDimRead(QK_t, i, j, N);
-             val = 0.0;
-                 twoDimWrite(QK_t, i, j, N, val);
-           }
-       }
-  */
-
   // -------- YOUR CODE HERE  -------- //
   vec_t k_vec;
   vec_t q_vec0, q_vec1, q_vec2, q_vec3;
@@ -246,62 +324,11 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
   for (int b = 0; b < B; ++b) {
     for (int h = 0; h < H; ++h) {
       // Q(N, d) * K(N, d)
-      for (int i = 0; i < N; i += 4) {
-        last = (N / 8) * 8;
-        // q(i, j) ......q(i, j + 7)
-        //    .    ......     .
-        //    .    ......     .
-        // q(i + 3)......q(i + 3, j + 7)
-        for (int j = 0; j < last; j += 8) {
-          qkt_vec0.v = _mm256_broadcast_ss(&zero);
-          qkt_vec1.v = _mm256_broadcast_ss(&zero);
-          qkt_vec2.v = _mm256_broadcast_ss(&zero);
-          qkt_vec3.v = _mm256_broadcast_ss(&zero);
-          for (int k = 0; k < d; ++k) {
-            q_val0 = fourDimRead(Q, b, h, i, k, H, N, d);
-            q_val1 = fourDimRead(Q, b, h, i + 1, k, H, N, d);
-            q_val2 = fourDimRead(Q, b, h, i + 2, k, H, N, d);
-            q_val3 = fourDimRead(Q, b, h, i + 3, k, H, N, d);
-
-            k_vec = fourDimReadVecAlongN(K, b, h, j, k, H, N, d);
-
-            q_vec0.v = _mm256_broadcast_ss(&q_val0);
-            q_vec1.v = _mm256_broadcast_ss(&q_val1);
-            q_vec2.v = _mm256_broadcast_ss(&q_val2);
-            q_vec3.v = _mm256_broadcast_ss(&q_val3);
-
-            qkt_vec0.v = _mm256_fmadd_ps(q_vec0.v, k_vec.v, qkt_vec0.v);
-            qkt_vec1.v = _mm256_fmadd_ps(q_vec1.v, k_vec.v, qkt_vec1.v);
-            qkt_vec2.v = _mm256_fmadd_ps(q_vec2.v, k_vec.v, qkt_vec2.v);
-            qkt_vec3.v = _mm256_fmadd_ps(q_vec3.v, k_vec.v, qkt_vec3.v);
-          }
-          twoDimWriteVec(QK_t, i, j, N, qkt_vec0);
-          twoDimWriteVec(QK_t, i + 1, j, N, qkt_vec1);
-          twoDimWriteVec(QK_t, i + 2, j, N, qkt_vec2);
-          twoDimWriteVec(QK_t, i + 3, j, N, qkt_vec3);
-        }
-        // calculate qk(i, p)
-        for (int p = last; p < N; ++p) {
-          qkt_val0 = 0.0f, qkt_val1 = 0.0f, qkt_val2 = 0.0f, qkt_val3 = 0.0f;
-          for (int k = 0; k < d; ++k) {
-            q_val0 = fourDimRead(Q, b, h, i, k, H, N, d);
-            q_val1 = fourDimRead(Q, b, h, i + 1, k, H, N, d);
-            q_val2 = fourDimRead(Q, b, h, i + 2, k, H, N, d);
-            q_val3 = fourDimRead(Q, b, h, i + 3, k, H, N, d);
-
-            k_val = fourDimRead(K, b, h, p, k, H, N, d);
-
-            qkt_val0 += q_val0 * k_val;
-            qkt_val1 += q_val1 * k_val;
-            qkt_val2 += q_val2 * k_val;
-            qkt_val3 += q_val3 * k_val;
-          }
-          twoDimWrite(QK_t, i, p, N, qkt_val0);
-          twoDimWrite(QK_t, i + 1, p, N, qkt_val1);
-          twoDimWrite(QK_t, i + 2, p, N, qkt_val2);
-          twoDimWrite(QK_t, i + 3, p, N, qkt_val3);
-        }
-      }
+      int Q_offset = fourDimOffset(Q, b, h, 0, 0, H, N, d);
+      int K_offset = fourDimOffset(K, b, h, 0, 0, H, N, d);
+      int QKt_offset = twoDimOffset(QK_t, 0, 0, N);
+      // std::cout << Q_offset << " " << K_offset << " " <<QKt_offset << "\n";
+      innerKernel(Q.data() +Q_offset, K.data() + K_offset, QK_t.data() + QKt_offset, N, d, N);
 
       // Softmax(QK_t)
       for (int i = 0; i < N; i += 4) {
@@ -366,6 +393,10 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor,
       }
 
       // Softmax(QK_t)[N, N] * V[N, d]
+      // int V_offset = fourDimOffset(V, b, h, 0, 0, H, N, d);
+      // int O_offset = fourDimOffset(O, b, h, 0, 0, H, N, d);
+
+
       for (int i = 0; i < N; i += 4) {
         last = (d / 8) * 8;
         // o(i, j), ......... ,o(i, j + 7)
@@ -458,6 +489,29 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor,
   std::vector<float> QK_t = formatTensor(QK_tTensor);
 
   // -------- YOUR CODE HERE  -------- //
+  const int NC = 256;
+  const int DC = 256;
+  for (int b = 0; b < B; ++b) {
+    for (int h = 0; h < H; ++h) {
+      // Block Q, K, QK_t
+      for (int i = 0; i < N; i += NC) {
+        int ib = std::min(NC, N - i);
+        for (int j = 0; j < N; j += NC) {
+          int jb = std::min(NC, N - j);
+          for (int k = 0; k < d; k += DC) {
+            int kb = std::min(DC, N - k);
+
+            int Q_offset = fourDimOffset(Q, b, h, i, j, H, N, d);
+            int K_offset = fourDimOffset(K, b, h, j, k, H, N, d);
+            int QKt_offset = twoDimOffset(QK_t, i, j, N);
+
+            innerKernel(Q.data() + Q_offset, K.data() + K_offset,
+                        QK_t.data() + QKt_offset, ib, jb, kb);
+          }
+        }
+      }
+    }
+  }
 
   // DO NOT EDIT THIS RETURN STATEMENT //
   // It formats your C++ Vector O back into a Tensor of Shape (B, H, N, d) and
