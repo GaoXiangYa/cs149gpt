@@ -97,6 +97,8 @@ inline void getVecSoftmax(vec_t &softmax_vec, const vec_t &qkt_vec,
 #define B(i, j) B[(i) * ldb + j]
 #define C(i, j) C[(i) * ldc + j]
 
+#define A_idx(i, j) (i) * lda + j
+
 template <bool TransposeB = false>
 inline void addDot4x8(float *A, float *B, float *C, int M, int N, int K,
                       const int lda, const int ldb, const int ldc) {
@@ -107,10 +109,10 @@ inline void addDot4x8(float *A, float *B, float *C, int M, int N, int K,
 
   float a_val0 = 0.0f, a_val1 = 0.0f, a_val2 = 0.0f, a_val3 = 0.0f;
 
-  c_vec0.v = _mm256_broadcast_ss(&zero);
-  c_vec1.v = _mm256_broadcast_ss(&zero);
-  c_vec2.v = _mm256_broadcast_ss(&zero);
-  c_vec3.v = _mm256_broadcast_ss(&zero);
+  c_vec0.v = _mm256_loadu_ps(&C(0, 0));
+  c_vec1.v = _mm256_loadu_ps(&C(1, 0));
+  c_vec2.v = _mm256_loadu_ps(&C(2, 0));
+  c_vec3.v = _mm256_loadu_ps(&C(3, 0));
 
   a_vec0.v = _mm256_broadcast_ss(&zero);
   a_vec1.v = _mm256_broadcast_ss(&zero);
@@ -130,55 +132,6 @@ inline void addDot4x8(float *A, float *B, float *C, int M, int N, int K,
     a_vec3.v = _mm256_broadcast_ss(&a_val3);
 
     b_vec.v = _mm256_load_ps(B + k * ldb);
-
-    c_vec0.v = _mm256_fmadd_ps(a_vec0.v, b_vec.v, c_vec0.v);
-    c_vec1.v = _mm256_fmadd_ps(a_vec1.v, b_vec.v, c_vec1.v);
-    c_vec2.v = _mm256_fmadd_ps(a_vec2.v, b_vec.v, c_vec2.v);
-    c_vec3.v = _mm256_fmadd_ps(a_vec3.v, b_vec.v, c_vec3.v);
-  }
-
-  _mm256_storeu_ps(&C(0, 0), c_vec0.v);
-  _mm256_storeu_ps(&C(1, 0), c_vec1.v);
-  _mm256_storeu_ps(&C(2, 0), c_vec2.v);
-  _mm256_storeu_ps(&C(3, 0), c_vec3.v);
-}
-
-template <bool TransposeB>
-inline void addDotPackedMatrix4x8(float *packed_A, float *packed_B, float *C,
-                                  int K, const int ldc) {
-  constexpr float zero = 0.0f;
-  vec_t a_vec0, a_vec1, a_vec2, a_vec3;
-  vec_t b_vec;
-  vec_t c_vec0, c_vec1, c_vec2, c_vec3;
-
-  // float a_val0 = 0.0f, a_val1 = 0.0f, a_val2 = 0.0f, a_val3 = 0.0f;
-  float *a0_ptr = packed_A;
-  float *a1_ptr = packed_A + K;
-  float *a2_ptr = packed_A + 2 * K;
-  float *a3_ptr = packed_A + 3 * K;
-
-  c_vec0.v = _mm256_broadcast_ss(&zero);
-  c_vec1.v = _mm256_broadcast_ss(&zero);
-  c_vec2.v = _mm256_broadcast_ss(&zero);
-  c_vec3.v = _mm256_broadcast_ss(&zero);
-
-  a_vec0.v = _mm256_broadcast_ss(&zero);
-  a_vec1.v = _mm256_broadcast_ss(&zero);
-  a_vec2.v = _mm256_broadcast_ss(&zero);
-  a_vec3.v = _mm256_broadcast_ss(&zero);
-
-  b_vec.v = _mm256_broadcast_ss(&zero);
-
-  for (int k = 0; k < K; ++k) {
-    a_vec0.v = _mm256_broadcast_ss(a0_ptr + k);
-    a_vec1.v = _mm256_broadcast_ss(a1_ptr + k);
-    a_vec2.v = _mm256_broadcast_ss(a2_ptr + k);
-    a_vec3.v = _mm256_broadcast_ss(a3_ptr + k);
-
-    // b_vec.v = !TransposeB ? _mm256_loadu_ps(&B(k, 0))
-    //                       : _mm256_set_ps(B(7, k), B(6, k), B(5, k), B(4, k),
-    //                                       B(3, k), B(2, k), B(1, k), B(0,
-    //                                       k));
 
     c_vec0.v = _mm256_fmadd_ps(a_vec0.v, b_vec.v, c_vec0.v);
     c_vec1.v = _mm256_fmadd_ps(a_vec1.v, b_vec.v, c_vec1.v);
@@ -218,11 +171,11 @@ inline void addDot4x1(float *A, float *B, float *C, const int M, const int N,
   C(3, 0) = c_val3;
 }
 
-template <bool IsRowMajor>
-inline void packMatrixA(float *A, float *packed_A, int m, int n, int lda) {
+template <bool IsColMajor>
+inline void packMatrixOutter(float *A, float *packed_A, int m, int n, int lda) {
   for (int i = 0; i < m; ++i) {
     for (int j = 0; j < n; ++j) {
-      if constexpr (IsRowMajor) {
+      if constexpr (IsColMajor) {
         packed_A[j * n + i] = A(i, j);
       } else {
         *packed_A++ = A(i, j);
@@ -232,12 +185,21 @@ inline void packMatrixA(float *A, float *packed_A, int m, int n, int lda) {
 }
 
 // pack B to [m, n]
-template<bool TransposeB>
-inline void packMatrixB(float* B, float* packedB, int m, int n, int ldb) {
-  for (int i = 0; i < m; ++ i) {
-    for (int j = 0; j < n; ++ j) {
+template <bool TransposeB>
+inline void packMatrixInner(float *B, float *packedB, int m, int n, int ldb) {
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
       *packedB++ = TransposeB ? B(j, i) : B(i, j);
     }
+  }
+}
+
+void printMatrix(float *A, int m, int n, int lda) {
+  for (int i = 0; i < m; ++i) {
+    for (int j = 0; j < n; ++j) {
+      std::cout << A(i, j) << " ";
+    }
+    std::cout << "\n";
   }
 }
 // A[M, K] * B[K, N] = C[M, N]
@@ -255,34 +217,12 @@ inline void innerMatMulKernel(float *A, float *B, float *C, const int M,
 
   for (int j = 0; j < N; j += NR) {
     int jb = std::min(N - j, NR);
-    float* B_ptr = TransposeB ? &B(j, 0) : &B(0, j);
-    packMatrixB<TransposeB>(B_ptr, packedB, K, NR, ldb);
+    float *B_ptr = TransposeB ? &B(j, 0) : &B(0, j);
+    packMatrixInner<TransposeB>(B_ptr, packedB, K, jb, ldb);
     for (int i = 0; i < M; i += MR) {
-      addDot4x8(&A(i, 0), packedB, &C(i, j), M, N, K, lda, NR, ldc);
+      addDot4x8(&A(i, 0), packedB, &C(i, j), M, N, K, lda, jb, ldc);
     }
   }
-
-  // for (int i = 0; i < M; i += MR) {
-  //   last = (N / NR) * NR;
-  //   for (int j = 0; j < last; j += NR) {
-  //     // if constexpr (TransposeB) {
-  //     //   addDot4x8<TransposeB>(&A(i, 0), &B(j, 0), &C(i, j), M, N, K, lda, ldb,
-  //     //                         ldc);
-  //     // } else {
-  //     //   addDot4x8<TransposeB>(&A(i, 0), &B(0, j), &C(i, j), M, N, K, lda, ldb,
-  //     //                         ldc);
-  //     // }
-  //   }
-  //   for (int p = last; p < N; ++p) {
-  //     if constexpr (TransposeB) {
-  //       addDot4x1<TransposeB>(&A(i, 0), &B(p, 0), &C(i, p), M, N, K, lda, ldb,
-  //                             ldc);
-  //     } else {
-  //       addDot4x1<TransposeB>(&A(i, 0), &B(0, p), &C(i, p), M, N, K, lda, ldb,
-  //                             ldc);
-  //     }
-  //   }
-  // }
 }
 
 inline void innerSoftmaxKernel(float *A, const int M, const int N) {
@@ -460,13 +400,13 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor,
   std::vector<float> QK_t = formatTensor(QK_tTensor);
 
   // -------- YOUR CODE HERE  -------- //
-  const int NC = 256;
-  const int DC = 256;
+  const int NC = 512;
+  const int DC = 32;
 
-  float packed_Q[NC * DC];
-  float packed_K[NC * DC];
-  float packed_QKt[NC * DC];
-  float packed_V[NC * DC];
+  alignas(32) float packed_Q[NC * DC];
+  alignas(32) float packed_K[NC * DC];
+  alignas(32) float packed_QKt[NC * NC];
+  alignas(32) float packed_V[NC * DC];
 
   // -------- YOUR CODE HERE  -------- //
   for (int b = 0; b < B; ++b) {
@@ -479,54 +419,50 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor,
           for (int k = 0; k < d; k += DC) {
             int kb = std::min(d - k, DC);
 
-            // // pack matrix Q[N, d]
-            // int Q_offset = fourDimOffset(Q, b, h, i, k, H, N, d);
-            // packMatrix<false>(Q.data() + Q_offset, packed_Q, ib, kb, d);
+            // pack matrix Q[N, d]
+            int Q_offset = fourDimOffset(Q, b, h, i, k, H, N, d);
+            packMatrixOutter<false>(Q.data() + Q_offset, packed_Q, ib, kb, d);
 
-            // // pack matrix K[N, d]
-            // int K_offset = fourDimOffset(K, b, h, j, k, H, N, d);
-            // packMatrix<false>(K.data() + K_offset, packed_K, jb, kb, d);
+            // pack matrix K[N, d]
+            int K_offset = fourDimOffset(K, b, h, j, k, H, N, d);
 
-            // int QKt_offset = twoDimOffset(QK_t, i, j, N);
-            // innerMatMulKernel<true>(packed_Q, packed_K,
-            //                         QK_t.data() + QKt_offset, ib, jb, kb, d, d,
-            //                         N);
+            int QKt_offset = twoDimOffset(QK_t, i, j, N);
+            innerMatMulKernel<true>(packed_Q, K.data() + K_offset,
+                                    QK_t.data() + QKt_offset, ib, jb, kb, kb, d,
+                                    N);
           }
         }
       }
+
 
       // Softmax(QK_t)[N, N] * V[N, d]
       int QKt_offset = twoDimOffset(QK_t, 0, 0, N);
       innerSoftmaxKernel(QK_t.data() + QKt_offset, N, N);
 
-      // for (int i = 0; i < N; i += NC) {
-      //   int ib = std::min(N - i, NC);
-      //   for (int j = 0; j < d; j += DC) {
-      //     int jb = std::min(d - j, DC);
-      //     for (int k = 0; k < N; k += NC) {
-      //       int kb = std::min(N - k, NC);
+      for (int j = 0; j < d; j += DC) {
+        int jb = std::min(d - j, DC);
+        for (int i = 0; i < N; i += NC) {
+          int ib = std::min(N - i, NC);
+          for (int k = 0; k < N; k += NC) {
+            int kb = std::min(N - k, NC);
 
-      //       // pack matrix QK
-      //       int QKt_offset = twoDimOffset(QK_t, i, k, N);
-      //       packMatrix<false>(QK_t.data() + QKt_offset, packed_QKt, ib, kb,
-      //       N);
+            // pack matrix QK
+            QKt_offset = twoDimOffset(QK_t, i, k, N);
+            packMatrixOutter<false>(QK_t.data() + QKt_offset, packed_QKt, ib,
+                                    kb, N);
 
-      //       // pack matrix V
-      //       int V_offset = fourDimOffset(V, b, h, k, j, H, N, d);
-      //       packMatrix<false>(V.data() + V_offset, packed_V, kb, jb, d);
+            // pack matrix V
+            int V_offset = fourDimOffset(V, b, h, k, j, H, N, d);
+            packMatrixOutter<false>(V.data() + V_offset, packed_V, kb, jb, d);
 
-      //       // packed_QKt * packed_V
-      //       int O_offset = fourDimOffset(O, b, h, 0, 0, H, N, d);
-      //       innerMatMulKernel<false>(packed_QKt, packed_V, O.data() +
-      //       O_offset,
-      //                                ib, jb, kb, N, d, d);
-      //     }
-      //   }
-      // }
-      int V_offset = fourDimOffset(V, b, h, 0, 0, H, N, d);
-      int O_offset = fourDimOffset(O, b, h, 0, 0, H, N, d);
-      innerMatMulKernel<false>(QK_t.data() + QKt_offset, V.data() + V_offset,
-                               O.data() + O_offset, N, d, N, N, d, d);
+            // packed_QKt * packed_V
+            int O_offset = fourDimOffset(O, b, h, i, j, H, N, d);
+
+            innerMatMulKernel<false>(packed_QKt, packed_V, O.data() + O_offset,
+                                     ib, jb, kb, kb, jb, d);
+          }
+        }
+      }
     }
   }
 
