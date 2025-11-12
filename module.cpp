@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <immintrin.h>
 #include <iostream>
 #include <sys/time.h>
@@ -9,7 +10,7 @@
 #include <torch/extension.h>
 #include <vector>
 #include <xmmintrin.h>
-
+#include <x86intrin.h>
 // Uncomment for ISPC
 // #include "module_ispc.h"
 // using namespace ispc;
@@ -75,10 +76,67 @@ std::vector<float> formatTensor(torch::Tensor tensor) {
   return vec;
 }
 
+inline __m256 fastVecExp(const vec_t &x) {
+  const __m256 r = _mm256_set1_ps(0x1.8p23f);
+  const __m256 c_log2e = _mm256_set1_ps(0x1.715476p+0f); // log2(e)
+  const __m256 c_magic = _mm256_set1_ps(0x1.8p23f);
+  const __m256 c_invln2_approx = _mm256_set1_ps(0x1.7f7d1cp-20f);
+  const __m256 c_ln2_hi = _mm256_set1_ps(0x1.62e4p-1f);
+  const __m256 c_192 = _mm256_set1_ps(192.0f);
+  const __m256 one = _mm256_set1_ps(1.0f);
+  const __m256 zero = _mm256_setzero_ps();
+
+  // z = x * log2(e) + r
+  const __m256 z = _mm256_fmadd_ps(x.v, c_log2e, r);
+  const __m256 n = _mm256_sub_ps(z, r);
+
+  // b = -(n * c_invln2_approx) - (n * c_ln2_hi - x)
+  const __m256 t1 = _mm256_fnmadd_ps(n, c_invln2_approx, zero);
+  const __m256 b = _mm256_fnmadd_ps(n, c_ln2_hi, x.v);
+
+  // |n| > 192 → mask for overflow
+  const __m256 abs_n = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), n);
+  const __m256 mask_over = _mm256_cmp_ps(abs_n, c_192, _CMP_GT_OQ);
+
+  // u = b * b
+  const __m256 u = _mm256_mul_ps(b, b);
+
+  // 多项式逼近 e^b ≈ 1 + b + b² * (...)，来自 ggml 的系数
+  const __m256 c1 = _mm256_set1_ps(0x1.0e4020p-7f);
+  const __m256 c2 = _mm256_set1_ps(0x1.573e2ep-5f);
+  const __m256 c3 = _mm256_set1_ps(0x1.555e66p-3f);
+  const __m256 c4 = _mm256_set1_ps(0x1.fffdb6p-2f);
+  const __m256 c5 = _mm256_set1_ps(0x1.ffffecp-1f);
+
+  __m256 j = _mm256_fmadd_ps(c1, b, c2);
+  j = _mm256_fmadd_ps(j, u, _mm256_fmadd_ps(c3, b, c4));
+  j = _mm256_fmadd_ps(j, u, _mm256_fmadd_ps(c5, b, one));
+
+  // n 的整数部分表示 2^n
+  // AVX2 没有 _mm256_scalef_ps，用手动实现
+  __m256 n_int = _mm256_floor_ps(n);
+  __m256 pow2n = _mm256_castsi256_ps(_mm256_slli_epi32(
+      _mm256_add_epi32(_mm256_cvttps_epi32(n_int), _mm256_set1_epi32(127)),
+      23));
+
+  __m256 res = _mm256_mul_ps(j, pow2n);
+
+  // 溢出处理
+  __m256 alt = _mm256_blendv_ps(_mm256_set1_ps(INFINITY), zero,
+                                _mm256_cmp_ps(n, zero, _CMP_LE_OQ));
+  res = _mm256_blendv_ps(res, alt, mask_over);
+
+  return res;
+}
+
 inline float getVecExpSum(const vec_t &vec) {
-  return (std::exp(vec.d[0]) + std::exp(vec.d[1]) + std::exp(vec.d[2]) +
-          std::exp(vec.d[3]) + std::exp(vec.d[4]) + std::exp(vec.d[5]) +
-          std::exp(vec.d[6]) + std::exp(vec.d[7]));
+  vec_t res;
+  res.v = fastVecExp(vec);
+  float sum = 0.0f;
+  for (int i = 0; i < 8; ++i) {
+    sum += res.d[i];
+  }
+  return sum;
 }
 
 inline void getVecSoftmax(vec_t &softmax_vec, const vec_t &qkt_vec,
@@ -296,6 +354,20 @@ inline void innerSoftmaxKernel(float *A, const int M, const int N) {
     }
   }
 }
+
+inline void innerBlockedSoftmaxKernel(std::vector<float> &QK_t, const int M,
+                                      const int N) {
+  // Softmax(QK_t)
+  const int MC = 512;
+  alignas(32) float packed_QKt[MC * N];
+
+  for (int i = 0; i < M; i += MC) {
+    int ib = std::min(M - i, MC);
+    int jb = N;
+    int QKt_offset = twoDimOffset(QK_t, i, 0, N);
+    innerSoftmaxKernel(QK_t.data() + QKt_offset, ib, jb);
+  }
+}
 /* Programming Your Attention Modules.
  *
  * You are given Q, K, and V Tensors as inputs that are formatted as vectors. We
@@ -411,18 +483,16 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor,
   // -------- YOUR CODE HERE  -------- //
   for (int b = 0; b < B; ++b) {
     for (int h = 0; h < H; ++h) {
-
-      for (int i = 0; i < N; i += NC) {
-        int ib = std::min(N - i, NC);
-        for (int j = 0; j < N; j += NC) {
-          int jb = std::min(N - j, NC);
-          for (int k = 0; k < d; k += DC) {
-            int kb = std::min(d - k, DC);
-
-            // pack matrix Q[N, d]
-            int Q_offset = fourDimOffset(Q, b, h, i, k, H, N, d);
-            packMatrixOutter<false>(Q.data() + Q_offset, packed_Q, ib, kb, d);
-
+      
+      for (int k = 0; k < d; k += DC) {
+        int kb = std::min(d - k, DC);
+        for (int i = 0; i < N; i += NC) {
+          int ib = std::min(N - i, NC);
+          // pack matrix Q[N, d]
+          int Q_offset = fourDimOffset(Q, b, h, i, k, H, N, d);
+          packMatrixOutter<false>(Q.data() + Q_offset, packed_Q, ib, kb, d);
+          for (int j = 0; j < N; j += NC) {
+            int jb = std::min(N - j, NC);
             // pack matrix K[N, d]
             int K_offset = fourDimOffset(K, b, h, j, k, H, N, d);
 
@@ -434,32 +504,33 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor,
         }
       }
 
-
       // Softmax(QK_t)[N, N] * V[N, d]
       int QKt_offset = twoDimOffset(QK_t, 0, 0, N);
-      innerSoftmaxKernel(QK_t.data() + QKt_offset, N, N);
+      innerBlockedSoftmaxKernel(QK_t, N, N);
 
-      for (int j = 0; j < d; j += DC) {
-        int jb = std::min(d - j, DC);
+      for (int k = 0; k < N; k += NC) {
+        int kb = std::min(N - k, NC);
         for (int i = 0; i < N; i += NC) {
           int ib = std::min(N - i, NC);
-          for (int k = 0; k < N; k += NC) {
-            int kb = std::min(N - k, NC);
-
-            // pack matrix QK
-            QKt_offset = twoDimOffset(QK_t, i, k, N);
-            packMatrixOutter<false>(QK_t.data() + QKt_offset, packed_QKt, ib,
-                                    kb, N);
-
+          QKt_offset = twoDimOffset(QK_t, i, k, N);
+          packMatrixOutter<false>(QK_t.data() + QKt_offset, packed_QKt, ib, kb,
+                                  N);
+          for (int j = 0; j < d; j += DC) {
+            int jb = std::min(d - j, DC);
             // pack matrix V
             int V_offset = fourDimOffset(V, b, h, k, j, H, N, d);
-            packMatrixOutter<false>(V.data() + V_offset, packed_V, kb, jb, d);
+            // packMatrixOutter<false>(V.data() + V_offset, packed_V, kb, jb,
+            // d);
 
             // packed_QKt * packed_V
             int O_offset = fourDimOffset(O, b, h, i, j, H, N, d);
 
-            innerMatMulKernel<false>(packed_QKt, packed_V, O.data() + O_offset,
-                                     ib, jb, kb, kb, jb, d);
+            __builtin_prefetch(packed_QKt, 1, 3);
+            __builtin_prefetch(V.data() + V_offset, 1, 3);
+            __builtin_prefetch(O.data() + O_offset, 0, 2);
+            innerMatMulKernel<false>(packed_QKt, V.data() + V_offset,
+                                     O.data() + O_offset, ib, jb, kb, kb, d,
+                                     d);
           }
         }
       }
